@@ -1,306 +1,221 @@
---[==[HELP]==
--- 手機/PC 通用飛天腳本（基於原版修改）
--- 原版PC鍵盤控制已替換為跨平台GUI + Roblox內建搖桿
--- 手機：點擊GUI按鈕開關，按住Up/Down飛升降，搖桿控制前後左右
--- PC：同上，WASD控制前後左右
--- GUI位於右上角，可拖拽
--- 支援原參數（透過args傳入）
-]==] --
-
+-- 手機/PC 通用飛天腳本（已修復 + 加入懸浮球）
 local args = _E and _E.ARGS or {}
-local FLYK = Enum.KeyCode.H  -- 保留但未用，可選
 local uis = game:GetService("UserInputService")
 local lp = game.Players.LocalPlayer
 local RunService = game:GetService("RunService")
 local Camera = workspace.CurrentCamera
 
 local SPEED = args[1] or 127
-local REL_TO_CHAR = args[2] or false
 local MAX_TORQUE_RP = args[3] or 1e4
-local THRUST_P = args[4] or 1e5
 local MAX_THRUST = args[5] or 5e5
 local MAX_TORQUE_BG = args[6] or 3e4
-local THRUST_D = args[7] or math.huge
-local TURN_D = args[8] or 2e2
-local ROOT_PART = args[9]
 
-local flying = false
 local enabled = false
-local move_dir = Vector3.new()
-local humanoid
-local parent
-local ms = lp:GetMouse()  -- PC用
+local anchor_enabled = false
 local up_flag = false
 local down_flag = false
-local anchor_enabled = false
+local parent, humanoid
+local fly_bg, fly_rp, fly_pt, flyModel
 
--- 清理舊實例
-if _G.fly_evts then
-    for _, e in pairs(_G.fly_evts) do e:Disconnect() end
-end
+-- 清理舊物件
+if _G.fly_evts then for _,e in pairs(_G.fly_evts) do e:Disconnect() end end
 if _G.fly_bg then _G.fly_bg:Destroy() end
 if _G.fly_rp then _G.fly_rp:Destroy() end
 if _G.flyModel then _G.flyModel:Destroy() end
-if args[1] == false then return end
 
--- 創建隱藏目標模型（修復原版bug）
+-- 創建隱藏目標
 local function createFlyTarget()
-    _G.flyModel = Instance.new("Model")
-    _G.flyModel.Name = "FlyTarget"
-    _G.flyModel.Parent = workspace
-    _G.fly_pt = Instance.new("Part")
-    _G.fly_pt.Name = "Target"
-    _G.fly_pt.Parent = _G.flyModel
-    _G.fly_pt.Anchored = true
-    _G.fly_pt.CanCollide = false
-    _G.fly_pt.Size = Vector3.new(0.1, 0.1, 0.1)
-    _G.fly_pt.Transparency = 1
-    _G.flyModel.PrimaryPart = _G.fly_pt
+    flyModel = Instance.new("Model")
+    flyModel.Name = "FlyTarget"
+    flyModel.Parent = workspace
+    fly_pt = Instance.new("Part")
+    fly_pt.Size = Vector3.new(0.1,0.1,0.1)
+    fly_pt.Transparency = 1
+    fly_pt.Anchored = true
+    fly_pt.CanCollide = false
+    fly_pt.Parent = flyModel
 end
 
--- 初始化飛天物件
-local function init()
-    if ROOT_PART then
-        parent = ROOT_PART
-        local model = parent:FindFirstAncestorOfClass("Model")
-        if model then humanoid = model:FindFirstChildOfClass("Humanoid") end
-    else
-        local ch = lp.Character
-        if ch then
-            humanoid = ch:FindFirstChildOfClass("Humanoid")
-            parent = ch:FindFirstChild("HumanoidRootPart")
-        end
-    end
-    if not parent then return end
+-- 初始化飛天
+local function initFly()
+    local ch = lp.Character or lp.CharacterAdded:Wait()
+    parent = ch:WaitForChild("HumanoidRootPart")
+    humanoid = ch:FindFirstChild("Humanoid")
 
-    -- 清理舊物件
-    if _G.fly_bg then _G.fly_bg:Destroy() end
-    if _G.fly_rp then _G.fly_rp:Destroy() end
-    if _G.flyModel then _G.flyModel:Destroy() end
+    if fly_bg then fly_bg:Destroy() end
+    if fly_rp then fly_rp:Destroy() end
+    if flyModel then flyModel:Destroy() end
 
     createFlyTarget()
 
-    local rp_h = MAX_TORQUE_RP
-    _G.fly_bg = Instance.new("BodyGyro", parent)
-    _G.fly_bg.P = 3e4
-    _G.fly_bg.MaxTorque = Vector3.new()
+    fly_bg = Instance.new("BodyGyro", parent)
+    fly_bg.P = 30000
+    fly_bg.MaxTorque = Vector3.new(0,0,0)
 
-    _G.fly_rp = Instance.new("RocketPropulsion", parent)
-    _G.fly_rp.MaxTorque = Vector3.new(rp_h, rp_h, rp_h)
-    _G.fly_rp.CartoonFactor = 1
-    _G.fly_rp.Target = _G.fly_pt
-    _G.fly_rp.MaxSpeed = SPEED
-    _G.fly_rp.MaxThrust = MAX_THRUST
-    _G.fly_rp.ThrustP = THRUST_P
-    _G.fly_rp.ThrustD = THRUST_D
-    _G.fly_rp.TurnP = THRUST_P
-    _G.fly_rp.TurnD = TURN_D
-
-    enabled = false
+    fly_rp = Instance.new("RocketPropulsion", parent)
+    fly_rp.MaxSpeed = SPEED
+    fly_rp.MaxThrust = MAX_THRUST
+    fly_rp.ThrustP = 100000
+    fly_rp.TurnP = 100000
+    fly_rp.Target = fly_pt
+    fly_rp.CartoonFactor = 1
 end
 
--- 計算飛行方向（PC用mouse，mobile用螢幕中心）
-local function fly_dir()
-    local front
-    if REL_TO_CHAR then
-        front = parent.CFrame.LookVector
+-- 主 GUI + 懸浮球
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "FlyMenu"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = game:GetService("CoreGui")
+
+-- 懸浮球（左下角）
+local FloatBtn = Instance.new("TextButton", ScreenGui)
+FloatBtn.Size = UDim2.new(0,60,0,60)
+FloatBtn.Position = UDim2.new(0,20,1,-80)
+FloatBtn.BackgroundColor3 = Color3.fromRGB(0,0,0)
+FloatBtn.BackgroundTransparency = 0.4
+FloatBtn.Text = "飛"
+FloatBtn.TextColor3 = Color3.new(1,1,1)
+FloatBtn.TextScaled = true
+FloatBtn.Font = Enum.Font.GothamBold
+FloatBtn.Active = true
+FloatBtn.Draggable = true
+Instance.new("UICorner", FloatBtn).CornerRadius = UDim.new(1,0)
+
+-- 主選單
+local MainFrame = Instance.new("Frame", ScreenGui)
+MainFrame.Size = UDim2.new(0,240,0,300)
+MainFrame.Position = UDim2.new(1,-260,0,20)
+MainFrame.BackgroundColor3 = Color3.fromRGB(30,30,30)
+MainFrame.Visible = false
+MainFrame.Active = true
+MainFrame.Draggable = true
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0,12)
+
+local Title = Instance.new("TextLabel", MainFrame)
+Title.Size = UDim2.new(1,0,0,40)
+Title.BackgroundTransparency = 1
+Title.Text = "飛天控制"
+Title.TextColor3 = Color3.new(1,1,1)
+Title.TextScaled = true
+Title.Font = Enum.Font.GothamBold
+
+-- 開關函數（修復狀態同步）
+local function CreateToggle(text, default, posY, callback)
+    local btn = Instance.new("TextButton", MainFrame)
+    btn.Size = UDim2.new(0.9,0,0,40)
+    btn.Position = UDim2.new(0.05,0,0,posY)
+    btn.BackgroundColor3 = default and Color3.fromRGB(0,200,0) or Color3.fromRGB(60,60,60)
+    btn.Text = text .. (default and ": 開啟" or ": 關閉")
+    btn.TextColor3 = Color3.new(1,1,1)
+    btn.TextScaled = true
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0,8)
+
+    local state = default
+    btn.MouseButton1Click:Connect(function()
+        state = not state
+        btn.BackgroundColor3 = state and Color3.fromRGB(0,200,0) or Color3.fromRGB(60,60,60)
+        btn.Text = text .. (state and ": 開啟" or ": 關閉")
+        callback(state)
+    end)
+    return btn
+end
+
+-- 飛天開關
+local FlyToggle = CreateToggle("飛天", false, 50, function(v)
+    enabled = v
+    if v then
+        initFly()
+        fly_bg.MaxTorque = Vector3.new(MAX_TORQUE_BG,0,MAX_TORQUE_BG)
+        fly_rp.MaxTorque = Vector3.new(MAX_TORQUE_RP,MAX_TORQUE_RP,MAX_TORQUE_RP)
     else
-        local cam = workspace.CurrentCamera
-        local mx, my
-        if uis.TouchEnabled then
-            mx = cam.ViewportSize.X / 2
-            my = cam.ViewportSize.Y / 2
-        else
-            mx = ms.X
-            my = ms.Y
-        end
-        front = cam:ScreenPointToRay(mx, my).Direction
+        if fly_bg then fly_bg.MaxTorque = Vector3.new() end
+        if fly_rp then fly_rp.MaxTorque = Vector3.new() end
     end
-    return CFrame.new(Vector3.new(), front) * move_dir
+end)
+
+-- 錨定開關
+CreateToggle("錨定", false, 100, function(v)
+    anchor_enabled = v
+end)
+
+-- 速度顯示與調整
+local SpeedLabel = Instance.new("TextLabel", MainFrame)
+SpeedLabel.Size = UDim2.new(0.6,0,0,35)
+SpeedLabel.Position = UDim2.new(0.05,0,0,150)
+SpeedLabel.BackgroundTransparency = 1
+SpeedLabel.Text = "速度: "..SPEED
+SpeedLabel.TextColor3 = Color3.new(1,1,1)
+SpeedLabel.TextScaled = true
+
+local function UpdateSpeed()
+    SpeedLabel.Text = "速度: "..math.floor(SPEED)
+    if fly_rp then fly_rp.MaxSpeed = SPEED end
 end
 
--- 創建手機/PC通用GUI
-local function createGUI()
-    local screenGui = Instance.new("ScreenGui")
-    screenGui.Name = "FlyGUI"
-    screenGui.ResetOnSpawn = false
-    screenGui.Parent = game:GetService("CoreGui")
+local PlusBtn = Instance.new("TextButton", MainFrame)
+PlusBtn.Size = UDim2.new(0.18,0,0,35)
+PlusBtn.Position = UDim2.new(0.68,0,0,150)
+PlusBtn.BackgroundColor3 = Color3.fromRGB(0,255,127)
+PlusBtn.Text = "+"
+PlusBtn.TextScaled = true
+PlusBtn.MouseButton1Click:Connect(function()
+    SPEED = SPEED * 1.5
+    UpdateSpeed()
+end)
 
-    local mainFrame = Instance.new("Frame")
-    mainFrame.Size = UDim2.new(0, 220, 0, 280)
-    mainFrame.Position = UDim2.new(1, -240, 0, 20)
-    mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-    mainFrame.BorderSizePixel = 0
-    mainFrame.Active = true
-    mainFrame.Draggable = true
-    mainFrame.Parent = screenGui
+local MinusBtn = PlusBtn:Clone()
+MinusBtn.Position = UDim2.new(0.88,0,0,150)
+MinusBtn.BackgroundColor3 = Color3.fromRGB(255,100,100)
+MinusBtn.Text = "-"
+MinusBtn.MouseButton1Click:Connect(function()
+    SPEED = math.max(50, SPEED / 1.5)
+    UpdateSpeed()
+end)
 
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 12)
-    corner.Parent = mainFrame
+-- 上升/下降按鈕（按住）
+local UpBtn = Instance.new("TextButton", MainFrame)
+UpBtn.Size = UDim2.new(0.45,-5,0,40)
+UpBtn.Position = UDim2.new(0.05,0,0,200)
+UpBtn.BackgroundColor3 = Color3.fromRGB(0,170,255)
+UpBtn.Text = "上升"
+UpBtn.TextScaled = true
+UpBtn.InputBegan:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then up_flag = true end end)
+UpBtn.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then up_flag = false end end)
 
-    local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, 0, 0, 40)
-    title.Position = UDim2.new(0, 0, 0, 0)
-    title.BackgroundTransparency = 1
-    title.Text = "飛天控制"
-    title.TextColor3 = Color3.fromRGB(255, 255, 255)
-    title.TextScaled = true
-    title.Font = Enum.Font.GothamBold
-    title.Parent = mainFrame
+local DownBtn = UpBtn:Clone()
+DownBtn.Position = UDim2.new(0.55,0,0,200)
+DownBtn.Text = "下降"
+DownBtn.InputBegan:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then down_flag = true end end)
+DownBtn.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then down_flag = false end end)
 
-    local function createButton(text, pos, callback)
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0.9, 0, 0, 35)
-        btn.Position = pos
-        btn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
-        btn.Text = text
-        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        btn.TextScaled = true
-        btn.Font = Enum.Font.Gotham
-        btn.Parent = mainFrame
-        local btnCorner = Instance.new("UICorner", btn)
-        btnCorner.CornerRadius = UDim.new(0, 8)
-        btn.MouseButton1Click:Connect(callback)
-        return btn
+-- 懸浮球開關選單
+FloatBtn.MouseButton1Click:Connect(function()
+    MainFrame.Visible = not MainFrame.Visible
+end)
+
+-- 主循環
+RunService.RenderStepped:Connect(function()
+    if not enabled or not parent or not fly_rp then return end
+
+    local moveVector = require(lp.PlayerScripts.PlayerModule.ControlModule):GetMoveVector()
+    local y_input = (up_flag and 1 or 0) + (down_flag and -1 or 0)
+    local move_dir = Vector3.new(moveVector.X, y_input, moveVector.Z)
+
+    if move_dir.Magnitude > 0.1 then
+        fly_pt.Position = parent.Position + (Camera.CFrame * CFrame.new(move_dir * 9999)).Position
+        fly_rp:Fire()
+        fly_bg.CFrame = Camera.CFrame
+    else
+        fly_rp:Abort()
     end
 
-    local function createHoldButton(dir)
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0.45, -5, 0, 35)
-        btn.Position = UDim2.new(dir == "up" and 0.05 or 0.52, 0, 0, 220)
-        btn.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
-        btn.Text = dir == "up" and "上升" or "下降"
-        btn.TextColor3 = Color3.new(1,1,1)
-        btn.TextScaled = true
-        btn.Font = Enum.Font.Gotham
-        btn.Parent = mainFrame
-        local btnCorner = Instance.new("UICorner", btn)
-        btnCorner.CornerRadius = UDim.new(0, 8)
+    parent.Anchored = anchor_enabled
+end)
 
-        btn.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-                if dir == "up" then up_flag = true else down_flag = true end
-            end
-        end)
-        btn.InputEnded:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-                if dir == "up" then up_flag = false else down_flag = false end
-            end
-        end)
-        return btn
-    end
+-- 重生續飛
+lp.CharacterAdded:Connect(function()
+    task.wait(1)
+    if enabled then initFly() end
+end)
 
-    -- Fly Toggle
-    local flyBtn = createButton("飛天: 關閉", UDim2.new(0.05, 0, 0, 50), function()
-        enabled = not enabled
-        flyBtn.Text = enabled and "飛天: 開啟" or "飛天: 關閉"
-        flyBtn.BackgroundColor3 = enabled and Color3.fromRGB(0, 255, 0) or Color3.fromRGB(50, 50, 50)
-        if enabled then
-            if _G.fly_bg then _G.fly_bg.MaxTorque = Vector3.new(MAX_TORQUE_BG, 0, MAX_TORQUE_BG) end
-            if _G.fly_rp then _G.fly_rp.MaxTorque = Vector3.new(MAX_TORQUE_RP, MAX_TORQUE_RP, MAX_TORQUE_RP) end
-        else
-            if _G.fly_bg then _G.fly_bg.MaxTorque = Vector3.new() end
-            if _G.fly_rp then _G.fly_rp.MaxTorque = Vector3.new() end
-        end
-    end)
-
-    -- Anchor Toggle
-    local anchorBtn = createButton("錨定: 關閉", UDim2.new(0.05, 0, 0, 95), function()
-        anchor_enabled = not anchor_enabled
-        if parent then parent.Anchored = anchor_enabled end
-        anchorBtn.Text = anchor_enabled and "錨定: 開啟" or "錨定: 關閉"
-        anchorBtn.BackgroundColor3 = anchor_enabled and Color3.fromRGB(255, 165, 0) or Color3.fromRGB(50, 50, 50)
-    end)
-
-    -- Speed Label
-    local speedLabel = Instance.new("TextLabel")
-    speedLabel.Size = UDim2.new(0.6, 0, 0, 35)
-    speedLabel.Position = UDim2.new(0.05, 0, 0, 140)
-    speedLabel.BackgroundTransparency = 1
-    speedLabel.Text = "速度: " .. SPEED
-    speedLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    speedLabel.TextScaled = true
-    speedLabel.Font = Enum.Font.Gotham
-    speedLabel.Parent = mainFrame
-
-    -- Speed +/-
-    local speedUpBtn = Instance.new("TextButton")
-    speedUpBtn.Size = UDim2.new(0.18, 0, 0, 35)
-    speedUpBtn.Position = UDim2.new(0.68, 0, 0, 140)
-    speedUpBtn.BackgroundColor3 = Color3.fromRGB(0, 255, 127)
-    speedUpBtn.Text = "+"
-    speedUpBtn.TextScaled = true
-    speedUpBtn.Parent = mainFrame
-    local speedUpCorner = Instance.new("UICorner", speedUpBtn)
-    speedUpCorner.CornerRadius = UDim.new(0, 8)
-
-    local speedDownBtn = speedUpBtn:Clone()
-    speedDownBtn.Text = "-"
-    speedDownBtn.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
-    speedDownBtn.Position = UDim2.new(0.88, 0, 0, 140)
-    speedDownBtn.Parent = mainFrame
-    local speedDownCorner = Instance.new("UICorner", speedDownBtn)
-    speedDownCorner.CornerRadius = UDim.new(0, 8)
-
-    speedUpBtn.MouseButton1Click:Connect(function()
-        SPEED = SPEED * (3 / 2)
-        if _G.fly_rp then _G.fly_rp.MaxSpeed = SPEED end
-        speedLabel.Text = "速度: " .. math.floor(SPEED)
-    end)
-    speedDownBtn.MouseButton1Click:Connect(function()
-        SPEED = SPEED / (3 / 2)
-        SPEED = math.max(1, SPEED)  -- 最小速度
-        if _G.fly_rp then _G.fly_rp.MaxSpeed = SPEED end
-        speedLabel.Text = "速度: " .. math.floor(SPEED)
-    end)
-
-    -- Up/Down Buttons
-    createHoldButton("up")
-    createHoldButton("down")
-
-    return screenGui
-end
-
--- 主更新循環
-_G.fly_evts = {
-    lp.CharacterAdded:Connect(function()
-        task.wait(1)  -- 等待角色載入
-        init()
-    end),
-    RunService.RenderStepped:Connect(function()
-        if not _G.fly_rp or not parent then return end
-
-        -- 獲取移動向量（跨平台：PC WASD / Mobile 搖桿）
-        local playerScripts = lp:WaitForChild("PlayerScripts")
-        local playerModule = playerScripts:WaitForChild("PlayerModule")
-        local controlModule = require(playerModule:WaitForChild("ControlModule"))
-        local moveVector = controlModule:GetMoveVector()
-
-        -- Vertical from buttons
-        local y_input = 0
-        if up_flag then y_input = 1
-        elseif down_flag then y_input = -1 end
-
-        move_dir = Vector3.new(moveVector.X, y_input, moveVector.Z)
-
-        local do_fly = enabled and move_dir.Magnitude > 0
-        if flying ~= do_fly then
-            flying = do_fly
-            if humanoid then humanoid.AutoRotate = not do_fly end
-            if not do_fly then
-                parent.Velocity = Vector3.new()
-                _G.fly_rp:Abort()
-                return
-            end
-            _G.fly_rp:Fire()
-        end
-        _G.fly_pt.Position = parent.Position + 4096 * fly_dir()
-    end),
-}
-
--- 初始化
-createGUI()
-init()
-
-print("飛天腳本載入完成！右上角GUI控制（支援手機/PC）")
+print("飛天已載入！點左下角「飛」球開啟選單")
