@@ -1,4 +1,4 @@
--- 手機/PC 通用飛天腳本（已修復 + 加入懸浮球）
+-- 手機/PC 通用飛天腳本（已修復 + 加入懸浮球 + 減速按鈕改為-符號紅色背景）
 local args = _E and _E.ARGS or {}
 local uis = game:GetService("UserInputService")
 local lp = game.Players.LocalPlayer
@@ -83,8 +83,8 @@ Instance.new("UICorner", FloatBtn).CornerRadius = UDim.new(1,0)
 
 -- 主選單
 local MainFrame = Instance.new("Frame", ScreenGui)
-MainFrame.Size = UDim2.new(0,240,0,300)
-MainFrame.Position = UDim2.new(1,-260,0,20)
+MainFrame.Size = UDim2.new(0,280,0,300)
+MainFrame.Position = UDim2.new(1,-300,0,20)
 MainFrame.BackgroundColor3 = Color3.fromRGB(30,30,30)
 MainFrame.Visible = false
 MainFrame.Active = true
@@ -140,7 +140,7 @@ end)
 
 -- 速度顯示與調整
 local SpeedLabel = Instance.new("TextLabel", MainFrame)
-SpeedLabel.Size = UDim2.new(0.6,0,0,35)
+SpeedLabel.Size = UDim2.new(0.5,0,0,35)
 SpeedLabel.Position = UDim2.new(0.05,0,0,150)
 SpeedLabel.BackgroundTransparency = 1
 SpeedLabel.Text = "速度: "..SPEED
@@ -152,9 +152,10 @@ local function UpdateSpeed()
     if fly_rp then fly_rp.MaxSpeed = SPEED end
 end
 
+-- 加速按鈕（原功能）
 local PlusBtn = Instance.new("TextButton", MainFrame)
-PlusBtn.Size = UDim2.new(0.18,0,0,35)
-PlusBtn.Position = UDim2.new(0.68,0,0,150)
+PlusBtn.Size = UDim2.new(0.12,0,0,35)
+PlusBtn.Position = UDim2.new(0.58,0,0,150)
 PlusBtn.BackgroundColor3 = Color3.fromRGB(0,255,127)
 PlusBtn.Text = "+"
 PlusBtn.TextScaled = true
@@ -163,10 +164,23 @@ PlusBtn.MouseButton1Click:Connect(function()
     UpdateSpeed()
 end)
 
+-- 減速按鈕（修改為-符號 + 紅色背景）
+local SlowBtn = Instance.new("TextButton", MainFrame)
+SlowBtn.Size = UDim2.new(0.12,0,0,35)
+SlowBtn.Position = UDim2.new(0.72,0,0,150)
+SlowBtn.BackgroundColor3 = Color3.fromRGB(255, 0, 0) -- 紅色背景
+SlowBtn.Text = "-" -- 改為-符號
+SlowBtn.TextScaled = true
+SlowBtn.MouseButton1Click:Connect(function()
+    SPEED = math.max(10, SPEED * 0.7) -- 最低速度限制為10，每次減速30%
+    UpdateSpeed()
+end)
+
+-- 重置速度按鈕（保留功能）
 local MinusBtn = PlusBtn:Clone()
-MinusBtn.Position = UDim2.new(0.88,0,0,150)
+MinusBtn.Position = UDim2.new(0.86,0,0,150)
 MinusBtn.BackgroundColor3 = Color3.fromRGB(255,100,100)
-MinusBtn.Text = "-"
+MinusBtn.Text = "R" -- 改為R表示重置
 MinusBtn.MouseButton1Click:Connect(function()
     SPEED = math.max(50, SPEED / 1.5)
     UpdateSpeed()
@@ -218,4 +232,4 @@ lp.CharacterAdded:Connect(function()
     if enabled then initFly() end
 end)
 
-print("飛天已載入！點左下角「飛」球開啟選單")
+print("飛天已載入！點左下角「飛」球開啟選單，減速按鈕已改為-符號紅色背景")
