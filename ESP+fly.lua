@@ -1,11 +1,12 @@
 -- 手機/PC 通用 Roblox 飛天+ESP+自瞄 優化穩定版
 -- 核心功能：可被自瞄→紅色射線/骨骼；不可被自瞄→綠色射線/骨骼 | 已移除長按自瞄
+-- 新增功能：自動跳(落地即跳) + 第一人稱FOV視距開關(默認200) + 穿牆=飛天雙開 | 修復飛天視角跟隨
 local args = _E and _E.ARGS or {}
 local uis = game:GetService("UserInputService")
 local lp = game.Players.LocalPlayer
 local RunService = game:GetService("RunService")
 local Camera = workspace.CurrentCamera
-local Players = game:GetService("Players")
+local Players = game.Players
 
 -- ================ 配置參數 ================
 local Config = {
@@ -43,16 +44,29 @@ local Config = {
     Aimbot = {
         Enabled = false,
         AimPart = "Head",
-        Smooth = 0.4,
-        FOV = 80,
+        Smooth = 0.9,
+        FOV = 350,
         TargetCacheTime = 0.2,
         LastTarget = nil,
         LastTargetTime = 0
     },
-    Fly = {
-        Enabled = false,
+    -- 移動設置（穿牆=飛天 雙開）
+    Move = {
         Speed = 127,
-        Anchor = false
+        Enabled = false -- 控制穿牆+飛天雙開關
+    },
+    -- 新增功能配置
+    AutoJump = {
+        Enabled = false,
+        Connection = nil -- 存儲事件連接，用於關閉
+    },
+    FirstPersonFOV = {
+        Enabled = false,
+        DefaultValue = 200,
+        OriginalFOV = Camera.FieldOfView
+    },
+    Noclip = {
+        Connection = nil -- 穿牆碰撞事件連接
     }
 }
 
@@ -70,12 +84,11 @@ FOVCircle.Visible = Config.ESP.ShowFOV and Config.Aimbot.Enabled
 
 local LocalCharacter = lp.Character or lp.CharacterAdded:Wait()
 local LocalRoot = LocalCharacter:WaitForChild("HumanoidRootPart")
-local UpFlag = false
-local DownFlag = false
--- 已移除Touching變量
-local FlyTarget = nil
+local LocalHumanoid = LocalCharacter:WaitForChild("Humanoid")
+-- 飛天變量
 local FlyGyro = nil
-local FlyBody = nil
+-- 穿牆移動相關
+local NoclipMoveConn = nil
 
 -- ================ 核心工具函數 ================
 local function RefreshFOVCircle()
@@ -106,10 +119,28 @@ local function Cleanup(plr)
         return
     end
     for p in pairs(Drawings) do Cleanup(p) end
+    -- 清理飛天相關
     if FlyGyro then FlyGyro:Destroy() end
-    if FlyBody then FlyBody:Destroy() end
     FlyGyro = nil
-    FlyBody = nil
+    -- 清理穿牆相關
+    if Config.Noclip.Connection then
+        Config.Noclip.Connection:Disconnect()
+        Config.Noclip.Connection = nil
+    end
+    if NoclipMoveConn then
+        NoclipMoveConn:Disconnect()
+        NoclipMoveConn = nil
+    end
+    -- 清理自動跳相關
+    if Config.AutoJump.Connection then
+        Config.AutoJump.Connection:Disconnect()
+        Config.AutoJump.Connection = nil
+    end
+    -- 恢復原始FOV
+    if Config.FirstPersonFOV.Enabled then
+        Camera.FieldOfView = Config.FirstPersonFOV.OriginalFOV
+        Config.FirstPersonFOV.Enabled = false
+    end
 end
 
 -- 判斷敵人是否可被自瞄（基於自瞄邏輯）
@@ -144,22 +175,117 @@ local function IsPlayerAimable(plr)
     return hitResult == nil -- 無掩體=可被自瞄
 end
 
--- ================ 飛天功能實現 ================
+-- ================ 新增功能實現 ================
+-- 1. 自動跳（落地即跳，修復開關失效）
+local function ToggleAutoJump(state)
+    Config.AutoJump.Enabled = state
+    -- 先斷開舊的事件連接
+    if Config.AutoJump.Connection then
+        Config.AutoJump.Connection:Disconnect()
+        Config.AutoJump.Connection = nil
+    end
+    if state then
+        -- 開啟時立即檢查是否在地面，在地面就跳一次
+        if LocalHumanoid.FloorMaterial ~= Enum.Material.Air then
+            LocalHumanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+        end
+        -- 綁定地板檢測事件
+        Config.AutoJump.Connection = LocalHumanoid:GetPropertyChangedSignal("FloorMaterial"):Connect(function()
+            if LocalHumanoid.FloorMaterial ~= Enum.Material.Air then
+                LocalHumanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+            end
+        end)
+    end
+end
+
+-- 2. 第一人稱FOV視距開關（修復無效問題，強制設置200）
+local function ToggleFirstPersonFOV(state)
+    Config.FirstPersonFOV.Enabled = state
+    if state then
+        Config.FirstPersonFOV.OriginalFOV = Camera.FieldOfView
+        -- 強制設置FOV為200，確保生效
+        Camera.FieldOfView = Config.FirstPersonFOV.DefaultValue
+        -- 防止遊戲自動覆蓋，增加循環檢測
+        if NoclipMoveConn then
+            NoclipMoveConn:Disconnect()
+            NoclipMoveConn = nil
+        end
+        NoclipMoveConn = RunService.RenderStepped:Connect(function()
+            if Config.FirstPersonFOV.Enabled then
+                Camera.FieldOfView = Config.FirstPersonFOV.DefaultValue
+            end
+        end)
+    else
+        Camera.FieldOfView = Config.FirstPersonFOV.OriginalFOV
+        if NoclipMoveConn then
+            NoclipMoveConn:Disconnect()
+            NoclipMoveConn = nil
+        end
+    end
+end
+
+-- 3. 穿牆+飛天 雙開關（移除獨立飛天開關）
 local function InitFly()
     if not LocalRoot then return end
-    Cleanup()
-    FlyBody = Instance.new("Part")
-    FlyBody.Name = "FlyTarget"
-    FlyBody.Size = Vector3.new(0.1,0.1,0.1)
-    FlyBody.Transparency = 1
-    FlyBody.Anchored = true
-    FlyBody.CanCollide = false
-    FlyBody.Parent = workspace
-
+    -- 清理舊飛天變量
+    if FlyGyro then FlyGyro:Destroy() end
+    -- 創建BodyGyro用於視角跟隨
     FlyGyro = Instance.new("BodyGyro")
     FlyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
     FlyGyro.P = 5000
     FlyGyro.Parent = LocalRoot
+end
+
+local function ToggleNoclipFly(state)
+    Config.Move.Enabled = state
+    -- 先斷開舊的事件連接
+    if Config.Noclip.Connection then
+        Config.Noclip.Connection:Disconnect()
+        Config.Noclip.Connection = nil
+    end
+    if NoclipMoveConn then
+        NoclipMoveConn:Disconnect()
+        NoclipMoveConn = nil
+    end
+    -- 清理舊飛天
+    if FlyGyro then FlyGyro:Destroy() end
+    FlyGyro = nil
+
+    if state then
+        -- 開啟穿牆：關閉碰撞
+        Config.Noclip.Connection = RunService.Heartbeat:Connect(function()
+            if not LocalCharacter then return end
+            for _, part in pairs(LocalCharacter:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = false
+                end
+            end
+        end)
+        -- 開啟飛天：視角跟隨移動
+        InitFly()
+        NoclipMoveConn = RunService.RenderStepped:Connect(function()
+            if not LocalRoot or not FlyGyro then return end
+            FlyGyro.CFrame = Camera.CFrame
+            local moveVector = require(lp.PlayerScripts.PlayerModule.ControlModule):GetMoveVector()
+            local cameraRelativeMovement = Camera.CFrame:VectorToWorldSpace(Vector3.new(moveVector.X, 0, moveVector.Z))
+            local yMovement = Camera.CFrame.UpVector * moveVector.Y
+            local finalMove = (cameraRelativeMovement + yMovement).Unit
+            LocalRoot.Velocity = finalMove * Config.Move.Speed
+        end)
+    else
+        -- 關閉穿牆：恢復碰撞
+        if LocalCharacter then
+            for _, part in pairs(LocalCharacter:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = true
+                end
+            end
+        end
+        -- 關閉飛天：清空速度
+        if LocalRoot then
+            LocalRoot.Velocity = Vector3.new(0, 0, 0)
+        end
+    end
 end
 
 -- ================ ESP功能實現 ================
@@ -178,7 +304,6 @@ local function CreateESP(plr)
         Skeleton = {}
     }
     -- 初始化樣式
-    comp.Box.Thickness = 1
     comp.Box.Filled = true
     comp.Box.Transparency = Config.ESP.BoxTransparency
     comp.Box.Color = Config.ESP.BoxColor
@@ -201,13 +326,14 @@ local function CreateESP(plr)
     comp.ToolLabel.Center = true
     comp.ToolLabel.Outline = true
     comp.ToolLabel.Color = Config.ESP.ToolColor
-    -- 高亮元件
+    -- 高亮元件 - 修復：創建時直接綁定Parent到角色
     local hl = Instance.new("Highlight")
     hl.FillColor = Config.ESP.ChamsFillColor
     hl.OutlineColor = Color3.fromRGB(255,255,255)
     hl.FillTransparency = Config.ESP.ChamsTransparency
     hl.OutlineTransparency = 0
     hl.Enabled = false
+    hl.Parent = plr.Character
     Highlights[plr] = hl
     Drawings[plr] = comp
 end
@@ -268,6 +394,7 @@ local function UpdateESP(plr)
         comp.Box.Size = Vector2.new(boxWidth, boxHeight)
         comp.Box.Position = Vector2.new(boxX, boxY)
         comp.Box.Color = Config.ESP.BoxColor
+        comp.Box.Transparency = Config.ESP.BoxTransparency
     end
 
     -- 2. 血條
@@ -316,12 +443,16 @@ local function UpdateESP(plr)
         comp.Tracer.Color = isAimable and Config.ESP.TracerAimableColor or Config.ESP.TracerUnaimableColor
     end
 
-    -- 核心：5. 骨骼顏色切換
+    -- 核心：5. 骨骼顏色切換 - 完全還原原始R15/R6骨骼連接邏輯
     local SkeletonConnections = {
         R15 = {{"Head","UpperTorso"},{"UpperTorso","LowerTorso"},{"LowerTorso","LeftUpperLeg"},{"LowerTorso","RightUpperLeg"},{"LeftUpperLeg","LeftLowerLeg"},{"LeftLowerLeg","LeftFoot"},{"RightUpperLeg","RightLowerLeg"},{"RightLowerLeg","RightFoot"},{"UpperTorso","LeftUpperArm"},{"UpperTorso","RightUpperArm"},{"LeftUpperArm","LeftLowerArm"},{"LeftLowerArm","LeftHand"},{"RightUpperArm","RightLowerArm"},{"RightLowerArm","RightHand"}},
         R6 = {{"Head","Torso"},{"Torso","Left Arm"},{"Torso","Right Arm"},{"Torso","Left Leg"},{"Torso","Right Leg"}}
     }
     local conns = SkeletonConnections[hum.RigType.Name] or {}
+    -- 先清除舊的骨骼線條避免殘留
+    for _, line in pairs(comp.Skeleton) do
+        line.Visible = false
+    end
     if Config.ESP.ShowSkeleton and onScreen then
         for _, conn in ipairs(conns) do
             local a = char:FindFirstChild(conn[1])
@@ -331,6 +462,7 @@ local function UpdateESP(plr)
             if not line then
                 line = Drawing.new("Line")
                 line.Thickness = 1
+                line.ZIndex = 5 -- 提高層級防止被遮擋
                 comp.Skeleton[lineKey] = line
             end
             if a and b then
@@ -349,9 +481,8 @@ local function UpdateESP(plr)
         for _, line in pairs(comp.Skeleton) do line.Visible = false end
     end
 
-    -- 6. 高亮
+    -- 6. 高亮 - 修復：無需重複設置Parent，直接控制Enabled
     if Highlights[plr] then
-        Highlights[plr].Parent = char
         Highlights[plr].Enabled = Config.ESP.ChamsEnabled and onScreen
     end
 end
@@ -366,7 +497,7 @@ local function FindBestTarget()
         local hum = Config.Aimbot.LastTarget.Parent:FindFirstChild("Humanoid")
         local root = Config.Aimbot.LastTarget.Parent:FindFirstChild("HumanoidRootPart")
         if hum and hum.Health > 0 and root then
-            local targetPart = Config.Aimbot.LastTarget.Parent:FindFirstChild(Config.Aimbot.AimPart) or root
+            local targetPart = Config.Aimbot.LastTarget.Parent:FindFirstChild(Config.Aimbot.AimPart) or Config.Aimbot.LastTarget
             local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
             local fovDist = (Vector2.new(screenPos.X, screenPos.Y) - centerPos).Magnitude
             local realDist = (LocalRoot.Position - targetPart.Position).Magnitude
@@ -407,7 +538,7 @@ local function FindBestTarget()
     return closestPart
 end
 
--- ================ GUI構建 ================
+-- ================ GUI創建工具函數 ================
 local function CreateSliderToggle(parent, text, default, posX, posY, callback)
     local width, height = 100, 25
     local toggleFrame = Instance.new("Frame", parent)
@@ -441,7 +572,7 @@ local function CreateSliderToggle(parent, text, default, posX, posY, callback)
     return toggleFrame
 end
 
-local function CreatePlusMinusAdjuster(parent, text, defaultValue, minVal, maxVal, step, isSmooth, posX, posY, callback)
+local function CreatePlusMinusAdjuster(parent, text, defaultValue, step, isSmooth, minVal, maxVal, posX, posY, callback)
     local width, height = 150, 25
     local currentVal = defaultValue
     local adjustFrame = Instance.new("Frame", parent)
@@ -501,7 +632,7 @@ local function CreatePlusMinusAdjuster(parent, text, defaultValue, minVal, maxVa
     return adjustFrame
 end
 
--- 創建GUI
+-- ================ 創建GUI ================
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "UniversalAimbotESP"
 ScreenGui.ResetOnSpawn = false
@@ -521,9 +652,10 @@ FloatCorner.CornerRadius = UDim.new(1,0)
 local FloatStroke = Instance.new("UIStroke", FloatBtn)
 FloatStroke.Color = Color3.fromRGB(100,100,100)
 FloatStroke.Thickness = 1
+
 local MainFrame = Instance.new("Frame", ScreenGui)
-MainFrame.Size = UDim2.new(0,700,0,250)
-MainFrame.Position = UDim2.new(0.5,-350,1,-270)
+MainFrame.Size = UDim2.new(0,700,0,300)
+MainFrame.Position = UDim2.new(0.5,-350,1,-320)
 MainFrame.BackgroundColor3 = Color3.fromRGB(25,25,25)
 MainFrame.Visible = false
 MainFrame.Active = true
@@ -536,48 +668,18 @@ MainStroke.Thickness = 1
 local Title = Instance.new("TextLabel", MainFrame)
 Title.Size = UDim2.new(1,0,0,30)
 Title.BackgroundTransparency = 1
-Title.Text = "Roblox 全能輔助面板（射線/骨骼顏色切換版）"
+Title.Text = "Roblox 全能輔助面板（最終優化版）"
 Title.TextColor3 = Color3.new(1,1,1)
 Title.TextSize = 16
 Title.Font = Enum.Font.GothamBold
 Title.Position = UDim2.new(0,0,0,5)
 Title.TextXAlignment = Enum.TextXAlignment.Center
--- 飛天控制
-CreateSliderToggle(MainFrame, "飛天", false, 10, 40, function(v)
-    Config.Fly.Enabled = v
-    if v then InitFly() else Cleanup() end
+
+-- 移動速度調節（控制穿牆+飛天速度）
+CreatePlusMinusAdjuster(MainFrame, "移動速度", Config.Move.Speed, 10, false, 120, 500, 10, 40, function(val)
+    Config.Move.Speed = val
 end)
-CreateSliderToggle(MainFrame, "錨定", false, 120, 40, function(v)
-    Config.Fly.Anchor = v
-    if LocalRoot then LocalRoot.Anchored = v end
-end)
-CreatePlusMinusAdjuster(MainFrame, "飛速", Config.Fly.Speed, 10, 500, 10, false, 230, 40, function(val)
-    Config.Fly.Speed = val
-end)
-local UpBtn = Instance.new("TextButton", MainFrame)
-UpBtn.Size = UDim2.new(0,40,0,25)
-UpBtn.Position = UDim2.new(0,390,0,40)
-UpBtn.BackgroundColor3 = Color3.fromRGB(0,150,255)
-UpBtn.Text = "↑"
-UpBtn.TextColor3 = Color3.new(1,1,1)
-UpBtn.TextScaled = true
-UpBtn.Font = Enum.Font.GothamBold
-local UpCorner = Instance.new("UICorner", UpBtn)
-UpCorner.CornerRadius = UDim.new(0,6)
-local DownBtn = Instance.new("TextButton", MainFrame)
-DownBtn.Size = UDim2.new(0,40,0,25)
-DownBtn.Position = UDim2.new(0,440,0,40)
-DownBtn.BackgroundColor3 = Color3.fromRGB(150,0,255)
-DownBtn.Text = "↓"
-DownBtn.TextColor3 = Color3.new(1,1,1)
-DownBtn.TextScaled = true
-DownBtn.Font = Enum.Font.GothamBold
-local DownCorner = Instance.new("UICorner", DownBtn)
-DownCorner.CornerRadius = UDim.new(0,6)
-UpBtn.InputBegan:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then UpFlag = true end end)
-UpBtn.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then UpFlag = false end end)
-DownBtn.InputBegan:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then DownFlag = true end end)
-DownBtn.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then DownFlag = false end end)
+
 -- ESP開關
 CreateSliderToggle(MainFrame, "ESP總開啟", false, 10, 75, function(v)
     Config.ESP.Enabled = v
@@ -594,6 +696,7 @@ CreateSliderToggle(MainFrame, "射線", true, 230, 75, function(v) Config.ESP.Sh
 CreateSliderToggle(MainFrame, "骨骼", true, 340, 75, function(v) Config.ESP.ShowSkeleton = v end)
 CreateSliderToggle(MainFrame, "高亮", false, 450, 75, function(v) Config.ESP.ChamsEnabled = v end)
 CreateSliderToggle(MainFrame, "血條", true, 560, 75, function(v) Config.ESP.ShowHealth = v end)
+
 -- ESP細項
 CreateSliderToggle(MainFrame, "名稱", true, 10, 110, function(v) Config.ESP.ShowName = v end)
 CreateSliderToggle(MainFrame, "距離", true, 155, 110, function(v) Config.ESP.ShowDistance = v end)
@@ -603,7 +706,8 @@ CreateSliderToggle(MainFrame, "顯示FOV", true, 590, 110, function(v)
     Config.ESP.ShowFOV = v
     RefreshFOVCircle()
 end)
--- 自瞄控制（已移除長按自瞄按鈕）
+
+-- 自瞄控制
 CreateSliderToggle(MainFrame, "自瞄總開啟", false, 10, 145, function(v)
     Config.Aimbot.Enabled = v
     RefreshFOVCircle()
@@ -622,22 +726,27 @@ AimPartBtn.MouseButton1Click:Connect(function()
     Config.Aimbot.AimPart = Config.Aimbot.AimPart == "Head" and "UpperTorso" or "Head"
     AimPartBtn.Text = Config.Aimbot.AimPart == "Head" and "鎖頭" or "鎖身"
 end)
-CreatePlusMinusAdjuster(MainFrame, "自瞄平滑", Config.Aimbot.Smooth, 0.05, 1.0, 0.05, true, 230, 145, function(val)
+CreatePlusMinusAdjuster(MainFrame, "自瞄平滑", Config.Aimbot.Smooth, 0.05, true, 0.05, 1.0, 230, 145, function(val)
     Config.Aimbot.Smooth = val
 end)
-CreatePlusMinusAdjuster(MainFrame, "FOV大小", Config.Aimbot.FOV, 20, 360, 10, false, 390, 145, function(val)
+CreatePlusMinusAdjuster(MainFrame, "FOV大小", Config.Aimbot.FOV, 10, false, 20, 360, 390, 145, function(val)
     Config.Aimbot.FOV = val
     RefreshFOVCircle()
 end)
+
+-- 新增功能開關（自動跳+第一人稱FOV+穿牆飛天雙開）
+CreateSliderToggle(MainFrame, "自動跳", false, 10, 180, ToggleAutoJump)
+CreateSliderToggle(MainFrame, "第一人稱FOV", false, 120, 180, ToggleFirstPersonFOV)
+CreateSliderToggle(MainFrame, "穿牆+飛天", false, 230, 180, ToggleNoclipFly)
+
 -- 懸浮按鈕切換面板
 FloatBtn.MouseButton1Click:Connect(function()
     MainFrame.Visible = not MainFrame.Visible
 end)
 
--- ================ 輸入監聽（已移除Touching相關監聽） ================
-
 -- ================ 主循環 ================
 RunService.Heartbeat:Connect(function()
+    -- ESP更新
     for _, plr in pairs(Players:GetPlayers()) do
         if plr ~= lp then
             if not Drawings[plr] and Config.ESP.Enabled then CreateESP(plr) end
@@ -645,22 +754,10 @@ RunService.Heartbeat:Connect(function()
         end
     end
 end)
+
 RunService.RenderStepped:Connect(function()
     RefreshFOVCircle()
-    -- 飛天邏輯
-    if Config.Fly.Enabled and FlyBody and FlyGyro and LocalRoot then
-        local moveVector = require(lp.PlayerScripts.PlayerModule.ControlModule):GetMoveVector()
-        local y_input = (UpFlag and 1 or 0) + (DownFlag and -1 or 0)
-        local move_dir = Vector3.new(moveVector.X, y_input, moveVector.Z)
-        if move_dir.Magnitude > 0.1 then
-            FlyBody.Position = LocalRoot.Position + (Camera.CFrame.LookVector * 100)
-            FlyGyro.CFrame = Camera.CFrame
-            LocalRoot.Velocity = move_dir * Config.Fly.Speed
-        else
-            LocalRoot.Velocity = Vector3.new(0,0,0)
-        end
-    end
-    -- 自瞄邏輯（已移除長按自瞄的判定條件）
+    -- 自瞄邏輯
     if not Config.Aimbot.Enabled then return end
     local targetPart = FindBestTarget()
     if targetPart then
@@ -675,11 +772,22 @@ lp.CharacterRemoving:Connect(function()
     Cleanup()
     LocalCharacter = nil
     LocalRoot = nil
+    LocalHumanoid = nil
 end)
 lp.CharacterAdded:Connect(function(char)
     LocalCharacter = char
     LocalRoot = char:WaitForChild("HumanoidRootPart")
-    if Config.Fly.Enabled then InitFly() end
+    LocalHumanoid = char:WaitForChild("Humanoid")
+    -- 角色重生後恢復各功能狀態
+    if Config.Move.Enabled then
+        ToggleNoclipFly(true)
+    end
+    if Config.AutoJump.Enabled then
+        ToggleAutoJump(true)
+    end
+    if Config.FirstPersonFOV.Enabled then
+        ToggleFirstPersonFOV(true)
+    end
 end)
 -- 卸載腳本
 uis.InputBegan:Connect(function(input)
