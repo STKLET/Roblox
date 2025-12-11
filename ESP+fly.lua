@@ -1,6 +1,6 @@
 -- 手機/PC 通用 Roblox 飛天+ESP+自瞄 優化穩定版
 -- 核心功能：可被自瞄→紅色射線/骨骼；不可被自瞄→綠色射線/骨骼 | 已移除長按自瞄
--- 新增功能：自動跳(落地即跳) + 第一人稱FOV視距開關(默認200) + 穿牆=飛天雙開 | 修復飛天視角跟隨
+-- 新增功能：自動跳(落地即跳) + 第一人稱FOV視距開關(默認200) + 穿牆=飛天雙開 | 修復飛天視角跟隨 + 角色自動360旋轉開關
 local args = _E and _E.ARGS or {}
 local uis = game:GetService("UserInputService")
 local lp = game.Players.LocalPlayer
@@ -67,6 +67,12 @@ local Config = {
     },
     Noclip = {
         Connection = nil -- 穿牆碰撞事件連接
+    },
+    -- 新增：自動旋轉配置
+    AutoRotate = {
+        Enabled = false,
+        RotateSpeed = 1800, -- 旋轉速度，可在GUI調節
+        RotateConnection = nil -- 旋轉事件連接
     }
 }
 
@@ -141,6 +147,11 @@ local function Cleanup(plr)
         Camera.FieldOfView = Config.FirstPersonFOV.OriginalFOV
         Config.FirstPersonFOV.Enabled = false
     end
+    -- 新增：清理自動旋轉
+    if Config.AutoRotate.RotateConnection then
+        Config.AutoRotate.RotateConnection:Disconnect()
+        Config.AutoRotate.RotateConnection = nil
+    end
 end
 
 -- 判斷敵人是否可被自瞄（基於自瞄邏輯）
@@ -150,6 +161,7 @@ local function IsPlayerAimable(plr)
     local hum = char:FindFirstChild("Humanoid")
     local root = char:FindFirstChild("HumanoidRootPart")
     if not hum or not root or hum.Health <= 0 then return false end
+    -- 核心修復：這裡的TeamCheck判斷要和自瞄一致，避免ESP和自瞄判定脫節
     if Config.ESP.TeamCheck and plr.Team == lp.Team then return false end
 
     -- 1. 視野內檢測
@@ -226,9 +238,6 @@ end
 
 -- 3. 穿牆+飛天 雙開關（移除獨立飛天開關）
 local function InitFly()
-    if not LocalRoot then return end
-    -- 清理舊飛天變量
-    if FlyGyro then FlyGyro:Destroy() end
     -- 創建BodyGyro用於視角跟隨
     FlyGyro = Instance.new("BodyGyro")
     FlyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
@@ -286,6 +295,36 @@ local function ToggleNoclipFly(state)
             LocalRoot.Velocity = Vector3.new(0, 0, 0)
         end
     end
+end
+
+-- 新增：4. 自動旋轉開關（支持死亡復活）
+local function SetupAutoRotate(character)
+    local hrp = character:WaitForChild("HumanoidRootPart")
+    local humanoid = character:WaitForChild("Humanoid")
+    humanoid.AutoRotate = false
+    Camera.CameraType = Enum.CameraType.Track
+
+    -- 斷開舊連接避免重複
+    if Config.AutoRotate.RotateConnection then
+        Config.AutoRotate.RotateConnection:Disconnect()
+    end
+
+    if Config.AutoRotate.Enabled then
+        Config.AutoRotate.RotateConnection = RunService.RenderStepped:Connect(function(deltaTime)
+            local rotateAngle = math.rad(Config.AutoRotate.RotateSpeed * deltaTime)
+            hrp.CFrame = hrp.CFrame * CFrame.Angles(0, rotateAngle, 0)
+        end)
+    end
+end
+
+local function ToggleAutoRotate(state)
+    Config.AutoRotate.Enabled = state
+    -- 當前角色生效
+    if LocalCharacter then
+        SetupAutoRotate(LocalCharacter)
+    end
+    -- 重生後自動生效
+    lp.CharacterAdded:Connect(SetupAutoRotate)
 end
 
 -- ================ ESP功能實現 ================
@@ -487,37 +526,46 @@ local function UpdateESP(plr)
     end
 end
 
--- ================ 自瞄核心 ================
+-- ================ 自瞄核心 - 關鍵修復 ================
 local function FindBestTarget()
     local closestPart = nil
     local closestDist = math.huge
     local centerPos = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
-    -- 優先檢查緩存目標
+    -- 核心修復1：優先檢查緩存目標時，額外增加隊友過濾
     if Config.Aimbot.LastTarget and Config.Aimbot.LastTarget.Parent then
-        local hum = Config.Aimbot.LastTarget.Parent:FindFirstChild("Humanoid")
-        local root = Config.Aimbot.LastTarget.Parent:FindFirstChild("HumanoidRootPart")
-        if hum and hum.Health > 0 and root then
-            local targetPart = Config.Aimbot.LastTarget.Parent:FindFirstChild(Config.Aimbot.AimPart) or Config.Aimbot.LastTarget
-            local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
-            local fovDist = (Vector2.new(screenPos.X, screenPos.Y) - centerPos).Magnitude
-            local realDist = (LocalRoot.Position - targetPart.Position).Magnitude
-            local rayParams = RaycastParams.new()
-            rayParams.FilterType = Enum.RaycastFilterType.Blacklist
-            rayParams.FilterDescendantsInstances = {LocalCharacter, Config.Aimbot.LastTarget.Parent}
-            local hitResult = workspace:Raycast(Camera.CFrame.Position, (targetPart.Position - Camera.CFrame.Position), rayParams)
-            if onScreen and not hitResult and fovDist <= Config.Aimbot.FOV and realDist <= Config.ESP.MaxDistance then
-                return targetPart
+        local targetPlr = Players:GetPlayerFromCharacter(Config.Aimbot.LastTarget.Parent)
+        -- 新增：如果開啟隊友隱藏且目標是隊友，直接清除緩存
+        if targetPlr and Config.ESP.TeamCheck and targetPlr.Team == lp.Team then
+            Config.Aimbot.LastTarget = nil
+        else
+            local hum = Config.Aimbot.LastTarget.Parent:FindFirstChild("Humanoid")
+            local root = Config.Aimbot.LastTarget.Parent:FindFirstChild("HumanoidRootPart")
+            if hum and hum.Health > 0 and root then
+                local targetPart = Config.Aimbot.LastTarget.Parent:FindFirstChild(Config.Aimbot.AimPart) or Config.Aimbot.LastTarget
+                local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
+                local fovDist = (Vector2.new(screenPos.X, screenPos.Y) - centerPos).Magnitude
+                local realDist = (LocalRoot.Position - targetPart.Position).Magnitude
+                local rayParams = RaycastParams.new()
+                rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+                rayParams.FilterDescendantsInstances = {LocalCharacter, Config.Aimbot.LastTarget.Parent}
+                local hitResult = workspace:Raycast(Camera.CFrame.Position, (targetPart.Position - Camera.CFrame.Position), rayParams)
+                if onScreen and not hitResult and fovDist <= Config.Aimbot.FOV and realDist <= Config.ESP.MaxDistance then
+                    return targetPart
+                end
             end
         end
     end
     -- 遍歷玩家尋找目標
     for _, plr in pairs(Players:GetPlayers()) do
         if plr == lp then continue end
+        -- 核心修復2：遍歷時優先過濾隊友，和ESP邏輯保持一致
+        if Config.ESP.TeamCheck and plr.Team == lp.Team then continue end
+
         local char = plr.Character
         local hum = char and char:FindFirstChild("Humanoid")
         local root = char and char:FindFirstChild("HumanoidRootPart")
         if not char or not hum or not root or hum.Health <= 0 then continue end
-        if Config.ESP.TeamCheck and plr.Team == lp.Team then continue end
+        
         local targetPart = char:FindFirstChild(Config.Aimbot.AimPart) or root
         local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
         local fovDist = (Vector2.new(screenPos.X, screenPos.Y) - centerPos).Magnitude
@@ -568,6 +616,10 @@ local function CreateSliderToggle(parent, text, default, posX, posY, callback)
         toggleBtn.Position = UDim2.new(state and 0.55 or 0.05,0,0.05,0)
         toggleBtn.BackgroundColor3 = state and Color3.fromRGB(0,180,0) or Color3.fromRGB(100,100,100)
         callback(state)
+        -- 核心修復3：切換隊友隱藏時，立即清除自瞄緩存目標
+        if text == "隊友隱藏" then
+            Config.Aimbot.LastTarget = nil
+        end
     end)
     return toggleFrame
 end
@@ -654,8 +706,8 @@ FloatStroke.Color = Color3.fromRGB(100,100,100)
 FloatStroke.Thickness = 1
 
 local MainFrame = Instance.new("Frame", ScreenGui)
-MainFrame.Size = UDim2.new(0,700,0,300)
-MainFrame.Position = UDim2.new(0.5,-350,1,-320)
+MainFrame.Size = UDim2.new(0,700,0,330) -- 加高面板容納新控件
+MainFrame.Position = UDim2.new(0.5,-350,1,-350) -- 對應調整位置
 MainFrame.BackgroundColor3 = Color3.fromRGB(25,25,25)
 MainFrame.Visible = false
 MainFrame.Active = true
@@ -701,7 +753,11 @@ CreateSliderToggle(MainFrame, "血條", true, 560, 75, function(v) Config.ESP.Sh
 CreateSliderToggle(MainFrame, "名稱", true, 10, 110, function(v) Config.ESP.ShowName = v end)
 CreateSliderToggle(MainFrame, "距離", true, 155, 110, function(v) Config.ESP.ShowDistance = v end)
 CreateSliderToggle(MainFrame, "武器", true, 300, 110, function(v) Config.ESP.ShowTool = v end)
-CreateSliderToggle(MainFrame, "隊友隱藏", false, 445, 110, function(v) Config.ESP.TeamCheck = v end)
+CreateSliderToggle(MainFrame, "隊友隱藏", false, 445, 110, function(v)
+    Config.ESP.TeamCheck = v
+    -- 額外保險：切換隊友隱藏時再次清除緩存
+    Config.Aimbot.LastTarget = nil
+end)
 CreateSliderToggle(MainFrame, "顯示FOV", true, 590, 110, function(v)
     Config.ESP.ShowFOV = v
     RefreshFOVCircle()
@@ -738,6 +794,16 @@ end)
 CreateSliderToggle(MainFrame, "自動跳", false, 10, 180, ToggleAutoJump)
 CreateSliderToggle(MainFrame, "第一人稱FOV", false, 120, 180, ToggleFirstPersonFOV)
 CreateSliderToggle(MainFrame, "穿牆+飛天", false, 230, 180, ToggleNoclipFly)
+
+-- 新增：自動旋轉開關 + 速度調節
+CreateSliderToggle(MainFrame, "自動旋轉", false, 340, 180, ToggleAutoRotate)
+CreatePlusMinusAdjuster(MainFrame, "旋轉速度", Config.AutoRotate.RotateSpeed, 100, false, 300, 3600, 450, 180, function(val)
+    Config.AutoRotate.RotateSpeed = val
+    -- 實時更新速度
+    if Config.AutoRotate.Enabled and LocalCharacter then
+        SetupAutoRotate(LocalCharacter)
+    end
+end)
 
 -- 懸浮按鈕切換面板
 FloatBtn.MouseButton1Click:Connect(function()
@@ -788,6 +854,10 @@ lp.CharacterAdded:Connect(function(char)
     if Config.FirstPersonFOV.Enabled then
         ToggleFirstPersonFOV(true)
     end
+    -- 新增：重生後恢復自動旋轉
+    if Config.AutoRotate.Enabled then
+        SetupAutoRotate(char)
+    end
 end)
 -- 卸載腳本
 uis.InputBegan:Connect(function(input)
@@ -804,4 +874,4 @@ Players.PlayerAdded:Connect(function(plr)
     end)
 end)
 
-print("全能輔助面板載入成功！按F12卸載 | 點擊懸浮按鈕打開面板")
+print("全能輔助面板載入成功！按F12卸載 | 點擊懸浮按鈕打開面板 | 新增自動旋轉功能 | 修復自瞄鎖隊友bug")
